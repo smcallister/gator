@@ -11,6 +11,7 @@ import (
 
 	"github.com/smcallister/gator/internal/config"
 	"github.com/smcallister/gator/internal/database"
+	"github.com/smcallister/gator/internal/rss"
 )
 
 import _ "github.com/lib/pq"
@@ -96,11 +97,7 @@ func handlerRegister(s *state, cmd command) error {
 		return err
 	}
 
-	fmt.Printf("Created user %s: ID=%v, CreatedAt=%v, UpdatedAt=%v\n",
-			   user.Name,
-			   user.ID,
-			   user.CreatedAt,
-			   user.UpdatedAt)
+	fmt.Printf("%+v\n", user)
 	return nil
 }
 
@@ -109,7 +106,7 @@ func handlerReset(s *state, cmd command) error {
 	return s.db.DeleteAllUsers(context.Background())
 }
 
-func handlerUsers(s *state, cmd command) error {
+func handlerGetUsers(s *state, cmd command) error {
 	// Get all users.
 	users, err := s.db.GetAllUsers(context.Background())
 	if err != nil {
@@ -124,6 +121,73 @@ func handlerUsers(s *state, cmd command) error {
 		}
 
 		fmt.Printf("\n")
+	}
+
+	return nil
+}
+
+func handlerAgg(s *state, cmd command) error {
+	// Get the feed.
+	feed, err := rss.FetchFeed(context.Background(), "https://www.wagslane.dev/index.xml")
+	if err != nil {
+		return err
+	}
+
+	// Print the feed.
+	fmt.Printf("%+v\n", feed)
+	return nil
+}
+
+func handlerAddFeed(s *state, cmd command) error {
+	// Validate arguments.
+	if len(cmd.Args) < 2 {
+		return fmt.Errorf("Format: addfeed <name> <url>\n")
+	}
+
+	name := cmd.Args[0]
+	url := cmd.Args[1]
+	
+	// Get the current user.
+	user, err := s.db.GetUser(context.Background(), s.cfg.CurrentUserName)
+	if err != nil {
+		return err
+	}
+
+	// Create the feed.
+	currentTime := time.Now()
+	params := database.CreateFeedParams{uuid.New(),
+							   			currentTime,
+							   			currentTime,
+							   			name,
+										url,
+										user.ID}
+	feed, err := s.db.CreateFeed(context.Background(), params)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("%+v\n", feed)
+	return nil
+}
+
+func handlerGetFeeds(s *state, cmd command) error {
+	// Get all feeds.
+	feeds, err := s.db.GetAllFeeds(context.Background())
+	if err != nil {
+		return err
+	}
+
+	// Print the feeds to the console.
+	for _, feed := range feeds {
+		user, err := s.db.GetUserByID(context.Background(), feed.UserID)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("Name: \"%s\", URL: \"%s\", User: \"%s\"\n",
+				   feed.Name,
+				   feed.Url,
+				   user.Name)
 	}
 
 	return nil
@@ -145,7 +209,10 @@ func main() {
 	cmds.register("login", handlerLogin)
 	cmds.register("register", handlerRegister)
 	cmds.register("reset", handlerReset)
-	cmds.register("users", handlerUsers)
+	cmds.register("users", handlerGetUsers)
+	cmds.register("agg", handlerAgg)
+	cmds.register("addfeed", handlerAddFeed)
+	cmds.register("feeds", handlerGetFeeds)
 
 	// Connect to the database.
 	db, err := sql.Open("postgres", c.DBUrl)
