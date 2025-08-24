@@ -8,13 +8,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 
 	"github.com/smcallister/gator/internal/config"
 	"github.com/smcallister/gator/internal/database"
 	"github.com/smcallister/gator/internal/rss"
 )
-
-import _ "github.com/lib/pq"
 
 type state struct {
 	db  *database.Queries
@@ -48,6 +47,56 @@ func (c *commands) register(name string, f func(*state, command) error) {
 	}
 
 	c.Handlers[name] = f
+}
+
+func scrapeFeeds(s *state) error {
+	// Get the next feed to fetch.
+	feed, err := s.db.GetNextFeedToFetch(context.Background())
+	if err != nil {
+		return err
+	}
+
+	err = s.db.MarkFeedFetched(context.Background(), feed.ID)
+	if err != nil {
+		return err
+	}
+
+	// Get the feed.
+	rssFeed, err := rss.FetchFeed(context.Background(), feed.Url)
+	if err != nil {
+		return err
+	}
+
+	// Add the posts to the database.
+	for _, item := range rssFeed.Channel.Item {
+		publishedTime, err := time.Parse("Mon, 02 Jan 2006 15:04:05 -0700", item.PubDate)
+		if err != nil {
+			fmt.Printf("Failed to parse published date for post %s: %v\n", item.Link, err)
+			continue
+		}
+
+		currentTime := time.Now()
+		params := database.CreatePostParams{
+			uuid.New(),
+			currentTime,
+			currentTime,
+			item.Title,
+			item.Link,
+			item.Description,
+			publishedTime,
+			feed.ID	}
+		_, err = s.db.CreatePost(context.Background(), params)
+		if err != nil {
+			pgErr, ok := err.(*pq.Error)
+			if !ok || pgErr.Code != "23505" {
+				fmt.Printf("Failed to create post %s: %v\n", item.Link, err)
+			}
+
+			continue
+		}
+	}
+
+	return nil
 }
 
 func middlewareLoggedIn(handler func(s *state, cmd command, user database.User) error) func(*state, command) error {
@@ -95,10 +144,12 @@ func handlerRegister(s *state, cmd command) error {
 
 	// Create the user.
 	currentTime := time.Now()
-	params := database.CreateUserParams{uuid.New(),
-							   			currentTime,
-							   			currentTime,
-							   			cmd.Args[0]}
+	params := database.CreateUserParams{
+		uuid.New(),
+		currentTime,
+		currentTime,
+		cmd.Args[0]	}
+
 	user, err := s.db.CreateUser(context.Background(), params)
 	if err != nil {
 		return err
@@ -140,14 +191,27 @@ func handlerGetUsers(s *state, cmd command) error {
 }
 
 func handlerAgg(s *state, cmd command) error {
-	// Get the feed.
-	feed, err := rss.FetchFeed(context.Background(), "https://www.wagslane.dev/index.xml")
+	// Validate arguments.
+	if len(cmd.Args) == 0 {
+		return fmt.Errorf("Format: agg <time_between_reqs>\n")
+	}
+
+	timeBetweenRequests, err := time.ParseDuration(cmd.Args[0])
 	if err != nil {
 		return err
 	}
 
-	// Print the feed.
-	fmt.Printf("%+v\n", feed)
+	fmt.Printf("Collecting feeds every %v\n", timeBetweenRequests)
+
+	// Fetch feeds.
+	ticker := time.NewTicker(timeBetweenRequests)
+	for ; ; <-ticker.C {
+		err = scrapeFeeds(s)
+		if err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -162,23 +226,27 @@ func handlerAddFeed(s *state, cmd command, user database.User) error {
 	
 	// Create the feed.
 	currentTime := time.Now()
-	feedParams := database.CreateFeedParams{uuid.New(),
-							   			    currentTime,
-							   			    currentTime,
-							   			    name,
-										    url,
-										    user.ID}
+	feedParams := database.CreateFeedParams{
+		uuid.New(),
+		currentTime,
+		currentTime,
+		name,
+		url,
+		user.ID	}
+
 	feed, err := s.db.CreateFeed(context.Background(), feedParams)
 	if err != nil {
 		return err
 	}
 
 	// Add a feed follow.
-	feedFollowParams := database.CreateFeedFollowParams{uuid.New(),
-							   			                currentTime,
-							   				  			currentTime,
-							   				  			user.ID,
-											  			feed.ID}
+	feedFollowParams := database.CreateFeedFollowParams{
+		uuid.New(),
+		currentTime,
+		currentTime,
+		user.ID,
+		feed.ID	}
+
 	_, err = s.db.CreateFeedFollow(context.Background(), feedFollowParams)
 	if err != nil {
 		return err
@@ -227,11 +295,13 @@ func handlerFollow(s *state, cmd command, user database.User) error {
 
 	// Create the feed follow.
 	currentTime := time.Now()
-	params := database.CreateFeedFollowParams{uuid.New(),
-							   			      currentTime,
-							   				  currentTime,
-							   				  user.ID,
-											  feed.ID}
+	params := database.CreateFeedFollowParams{
+		uuid.New(),
+		currentTime,
+		currentTime,
+		user.ID,
+		feed.ID	}
+
 	feedFollow, err := s.db.CreateFeedFollow(context.Background(), params)
 	if err != nil {
 		return err
@@ -265,7 +335,10 @@ func handlerUnfollow(s *state, cmd command, user database.User) error {
 	url := cmd.Args[0]
 
 	// Delete the feed follow.
-	params := database.DeleteFeedFollowParams{user.ID, url}
+	params := database.DeleteFeedFollowParams{
+		user.ID,
+		url	}
+
 	err := s.db.DeleteFeedFollow(context.Background(), params)
 	if err != nil {
 		return err
